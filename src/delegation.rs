@@ -1,11 +1,20 @@
-use hickory_resolver::{IntoName, Resolver, TokioResolver};
+use hickory_resolver::{
+    IntoName, Resolver, TokioResolver, config::ResolverConfig,
+    name_server::TokioConnectionProvider, proto::runtime::TokioRuntimeProvider,
+};
 use once_cell::sync::Lazy;
 use std::net::IpAddr;
 use tracing::debug;
 
 /// Resolve a `server_name` to its federation IP.
 pub async fn resolve_server_name(server_name: &str) -> anyhow::Result<Vec<IpAddr>> {
-    static RESOLVER: Lazy<TokioResolver> = Lazy::new(|| Resolver::builder_tokio().unwrap().build());
+    static RESOLVER: Lazy<TokioResolver> = Lazy::new(|| {
+        Resolver::builder_with_config(
+            ResolverConfig::cloudflare(),
+            TokioConnectionProvider::new(TokioRuntimeProvider::new()),
+        )
+        .build()
+    });
 
     // Try SRV _matrix._tcp.{SN} first
     debug!("Attempting to resolve {server_name} via SRV");
@@ -26,7 +35,16 @@ pub async fn resolve_server_name(server_name: &str) -> anyhow::Result<Vec<IpAddr
 
     // Next, try .well-known/matrix/server
     debug!("Attempting to resolve {server_name} via .well-known");
-    let resp = reqwest::get(format!("https://{server_name}/.well-known/matrix/server")).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    let resp = client
+        .get(format!("https://{server_name}/.well-known/matrix/server"))
+        .send()
+        .await?;
+
     if resp.status().is_success() {
         let json: serde_json::Value = resp.json().await?;
         debug!("Received .well-known response for {server_name}: {json}");

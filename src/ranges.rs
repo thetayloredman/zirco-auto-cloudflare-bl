@@ -9,6 +9,7 @@ static CLOUDFLARE_RANGES: Lazy<RwLock<(Instant, Vec<IpNet>)>> = Lazy::new(||
     RwLock::new((Instant::now() - REFRESH_INTERVAL * 2, Vec::new())));
 
 /// Returns the current list of Cloudflare IP ranges, refreshing it if it's older than 24 hours.
+#[allow(clippy::await_holding_lock)]
 pub async fn get_cloudflare_ranges() -> anyhow::Result<Vec<IpNet>> {
     {
         // Check if we can simply return the cached ranges

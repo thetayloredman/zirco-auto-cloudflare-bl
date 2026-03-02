@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO blocked_servers (server_name) VALUES (?1);",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "047120c682d9604a9fcd5651879382f6f5d6ece641f7fef007dd8871549657bc"
+}
