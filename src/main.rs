@@ -52,7 +52,7 @@ fn duration_until_next_sunday_morning() -> std::time::Duration {
 
 const DB_URL: &str = "sqlite://./db.sqlite?mode=rwc";
 const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-const MAX_CONCURRENT_RESOLUTIONS: usize = 1;
+const MAX_CONCURRENT_RESOLUTIONS: usize = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, EventContent)]
 #[ruma_event(type = "m.policy.rule.server", kind = State, state_key_type = String)]
