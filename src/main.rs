@@ -21,7 +21,7 @@ async fn main() {
         r#"
             CREATE TABLE IF NOT EXISTS blocked_servers (
                 server_name TEXT PRIMARY KEY
-        );
+            );
         "#,
     )
     .execute(&pool)
