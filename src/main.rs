@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::{Datelike, Local, Timelike};
 use dotenvy::dotenv;
 use futures::StreamExt;
 use matrix_sdk::{
@@ -19,6 +20,35 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 mod delegation;
 mod destinations;
 mod ranges;
+
+/// Calculate duration until next Sunday 8 AM
+fn duration_until_next_sunday_morning() -> std::time::Duration {
+    let now = Local::now();
+    let mut next_scan = now;
+
+    // Move to next day if past 8 AM today
+    if now.hour() >= 8 {
+        next_scan += chrono::Duration::days(1);
+    }
+
+    // Find next Sunday
+    while next_scan.weekday() != chrono::Weekday::Sun {
+        next_scan += chrono::Duration::days(1);
+    }
+
+    // Set time to 8 AM
+    let next_scan = next_scan
+        .with_hour(8)
+        .unwrap()
+        .with_minute(0)
+        .unwrap()
+        .with_second(0)
+        .unwrap();
+
+    (next_scan - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::from_hours(24))
+}
 
 const DB_URL: &str = "sqlite://./db.sqlite?mode=rwc";
 const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -99,74 +129,191 @@ async fn main() {
             .collect::<std::collections::HashSet<_>>(),
     ));
 
-    loop {
-        let destinations = destinations::get_destinations().await;
+    let pool1 = pool.clone();
+    let seen1 = seen.clone();
+    let client1 = client.clone();
 
-        let new_destinations = destinations
-            .iter()
-            .filter(|d| !seen.clone().lock().unwrap().contains(*d))
-            .cloned()
-            .collect::<Vec<_>>();
+    let new_servers_task = tokio::spawn(async move {
+        loop {
+            let destinations = destinations::get_destinations().await;
 
-        futures::stream::iter(new_destinations.iter())
-            .for_each_concurrent(Some(MAX_CONCURRENT_RESOLUTIONS), |dest| {
-                let seen = seen.clone();
-                let pool = pool.clone();
-                let client = client.clone();
-                async move {
-                    info!("Found new server: {dest}");
+            let new_destinations = destinations
+                .iter()
+                .filter(|d| !seen1.clone().lock().unwrap().contains(*d))
+                .cloned()
+                .collect::<Vec<_>>();
 
-                    if let Ok(ips) = delegation::resolve_server_name(dest).await {
-                        let cloudflare_ranges =
-                            ranges::get_cloudflare_ranges().await.unwrap_or_default();
-                        if ips
-                            .iter()
-                            .any(|ip| cloudflare_ranges.iter().any(|range| range.contains(ip)))
-                        {
-                            info!("{dest} is behind Cloudflare, blocking it!");
+            futures::stream::iter(new_destinations.iter())
+                .for_each_concurrent(Some(MAX_CONCURRENT_RESOLUTIONS), |dest| {
+                    let seen = seen1.clone();
+                    let pool = pool1.clone();
+                    let client = client1.clone();
+                    async move {
+                        info!("Found new server: {dest}");
 
-                            let room = client
-                                .get_room(
-                                    <&RoomId as TryFrom<&str>>::try_from(
-                                        std::env::var("POLICY_ROOM_ID").unwrap().as_str(),
+                        if let Ok(ips) = delegation::resolve_server_name(dest).await {
+                            let cloudflare_ranges =
+                                ranges::get_cloudflare_ranges().await.unwrap_or_default();
+                            if ips
+                                .iter()
+                                .any(|ip| cloudflare_ranges.iter().any(|range| range.contains(ip)))
+                            {
+                                info!("{dest} is behind Cloudflare, blocking it!");
+
+                                let room = client
+                                    .get_room(
+                                        <&RoomId as TryFrom<&str>>::try_from(
+                                            std::env::var("POLICY_ROOM_ID").unwrap().as_str(),
+                                        )
+                                        .unwrap(),
                                     )
-                                    .unwrap(),
-                                )
-                                .unwrap();
+                                    .unwrap();
 
-                            let bye_bye_event = ServerPolicyEventContent {
-                                entity: dest.clone(),
-                                reason: "Server is behind Cloudflare".to_string(),
-                                recommendation: "m.ban".to_string(),
-                            };
-                            room.send_state_event_for_key(&dest.clone(), bye_bye_event)
+                                let bye_bye_event = ServerPolicyEventContent {
+                                    entity: dest.clone(),
+                                    reason: "Server is behind Cloudflare".to_string(),
+                                    recommendation: "m.ban".to_string(),
+                                };
+                                room.send_state_event_for_key(&dest.clone(), bye_bye_event)
+                                    .await
+                                    .unwrap();
+
+                                sqlx::query!(
+                                    "INSERT OR IGNORE INTO blocked_servers (server_name) VALUES (?1);",
+                                    dest
+                                )
+                                .execute(&pool)
                                 .await
                                 .unwrap();
+                            } else {
+                                info!(
+                                    "Not blocking {dest} because it does not resolve to a Cloudflare IP"
+                                );
+                            }
+                        }
 
-                            sqlx::query!(
-                                "INSERT OR IGNORE INTO blocked_servers (server_name) VALUES (?1);",
-                                dest
-                            )
+                        // Add the server to the seen set and database
+                        seen.lock().unwrap().insert(dest.clone());
+                        sqlx::query!("INSERT INTO seen_servers (server_name) VALUES (?1);", dest)
                             .execute(&pool)
                             .await
                             .unwrap();
-                        } else {
-                            info!(
-                                "Not blocking {dest} because it does not resolve to a Cloudflare IP"
-                            );
+                    }
+                })
+                .await;
+
+            tokio::time::sleep(CHECK_INTERVAL).await;
+        }
+    });
+
+    let pool2 = pool.clone();
+    let client2 = client.clone();
+
+    let rescan_task = tokio::spawn(async move {
+        loop {
+            let wait_time = duration_until_next_sunday_morning();
+            info!("Next rescan scheduled in {:?}", wait_time);
+            tokio::time::sleep(wait_time).await;
+
+            info!("Starting weekly rescan of all servers...");
+            let all_servers = sqlx::query!("SELECT server_name FROM seen_servers;")
+                .fetch_all(&pool2)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.server_name.unwrap())
+                .collect::<Vec<_>>();
+
+            futures::stream::iter(all_servers.iter())
+                .for_each_concurrent(Some(MAX_CONCURRENT_RESOLUTIONS), |dest| {
+                    let pool = pool2.clone();
+                    let client = client2.clone();
+                    async move {
+                        info!("Rescanning {dest}...");
+
+                        if let Ok(ips) = delegation::resolve_server_name(dest).await {
+                            let cloudflare_ranges =
+                                ranges::get_cloudflare_ranges().await.unwrap_or_default();
+                            let is_cloudflare = ips
+                                .iter()
+                                .any(|ip| cloudflare_ranges.iter().any(|range| range.contains(ip)));
+
+                            let is_blocked = sqlx::query!("SELECT server_name FROM blocked_servers WHERE server_name = ?1;", dest)
+                                .fetch_optional(&pool)
+                                .await
+                                .unwrap()
+                                .is_some();
+
+                            // If it's on Cloudflare but not blocked, block it
+                            if is_cloudflare && !is_blocked {
+                                info!("{dest} is now behind Cloudflare, blocking it!");
+                                let room = client
+                                    .get_room(
+                                        <&RoomId as TryFrom<&str>>::try_from(
+                                            std::env::var("POLICY_ROOM_ID").unwrap().as_str(),
+                                        )
+                                        .unwrap(),
+                                    )
+                                    .unwrap();
+
+                                let bye_bye_event = ServerPolicyEventContent {
+                                    entity: dest.to_string(),
+                                    reason: "Server is behind Cloudflare".to_string(),
+                                    recommendation: "m.ban".to_string(),
+                                };
+                                room.send_state_event_for_key(dest, bye_bye_event)
+                                    .await
+                                    .unwrap();
+
+                                sqlx::query!(
+                                    "INSERT OR IGNORE INTO blocked_servers (server_name) VALUES (?1);",
+                                    dest
+                                )
+                                .execute(&pool)
+                                .await
+                                .unwrap();
+                            }
+                            // If it's not on Cloudflare but is blocked, unblock it
+                            else if !is_cloudflare && is_blocked {
+                                info!("{dest} is no longer behind Cloudflare, unblocking it!");
+                                sqlx::query!("DELETE FROM blocked_servers WHERE server_name = ?1;", dest)
+                                    .execute(&pool)
+                                    .await
+                                    .unwrap();
+
+                                let room = client
+                                    .get_room(
+                                        <&RoomId as TryFrom<&str>>::try_from(
+                                            std::env::var("POLICY_ROOM_ID").unwrap().as_str(),
+                                        )
+                                        .unwrap(),
+                                    )
+                                    .unwrap();
+                                let unban_event = ServerPolicyEventContent {
+                                    entity: dest.to_string(),
+                                    reason: "Server is no longer behind Cloudflare".to_string(),
+                                    recommendation: "m.allow".to_string(),
+                                };
+                                room.send_state_event_for_key(dest, unban_event)
+                                    .await
+                                    .unwrap();
+                            } else {
+                                info!(
+                                    "No change for {dest} (Cloudflare: {}, Blocked: {})",
+                                    is_cloudflare, is_blocked
+                                );
+                            }
                         }
                     }
+                })
+                .await;
 
-                    // Add the server to the seen set and database
-                    seen.lock().unwrap().insert(dest.clone());
-                    sqlx::query!("INSERT INTO seen_servers (server_name) VALUES (?1);", dest)
-                        .execute(&pool)
-                        .await
-                        .unwrap();
-                }
-            })
-            .await;
+            info!("Weekly rescan complete!");
+        }
+    });
 
-        tokio::time::sleep(CHECK_INTERVAL).await;
+    tokio::select! {
+        _ = new_servers_task => {},
+        _ = rescan_task => {},
     }
 }

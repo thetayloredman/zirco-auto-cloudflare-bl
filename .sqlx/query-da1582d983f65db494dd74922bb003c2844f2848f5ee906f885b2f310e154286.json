@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM blocked_servers WHERE server_name = ?1;",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "da1582d983f65db494dd74922bb003c2844f2848f5ee906f885b2f310e154286"
+}

@@ -9,7 +9,6 @@ static CLOUDFLARE_RANGES: Lazy<RwLock<(Instant, Vec<IpNet>)>> = Lazy::new(||
     RwLock::new((Instant::now() - REFRESH_INTERVAL * 2, Vec::new())));
 
 /// Returns the current list of Cloudflare IP ranges, refreshing it if it's older than 24 hours.
-#[allow(clippy::await_holding_lock)]
 pub async fn get_cloudflare_ranges() -> anyhow::Result<Vec<IpNet>> {
     {
         // Check if we can simply return the cached ranges
@@ -17,13 +16,6 @@ pub async fn get_cloudflare_ranges() -> anyhow::Result<Vec<IpNet>> {
         if guard.0.elapsed() < REFRESH_INTERVAL {
             return Ok(guard.1.clone());
         }
-    }
-
-    // Need to refresh the ranges
-    let mut guard = CLOUDFLARE_RANGES.write().unwrap();
-    // Check again in case another thread already refreshed while we were waiting for the lock
-    if guard.0.elapsed() < REFRESH_INTERVAL {
-        return Ok(guard.1.clone());
     }
 
     let resp = reqwest::get("https://api.cloudflare.com/client/v4/ips").await?;
@@ -58,6 +50,7 @@ pub async fn get_cloudflare_ranges() -> anyhow::Result<Vec<IpNet>> {
         }
     }
 
+    let mut guard = CLOUDFLARE_RANGES.write().unwrap();
     *guard = (Instant::now(), ranges.clone());
 
     Ok(ranges)

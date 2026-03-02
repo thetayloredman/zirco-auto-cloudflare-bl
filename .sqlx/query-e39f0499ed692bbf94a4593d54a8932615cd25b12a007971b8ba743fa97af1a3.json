@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT server_name FROM blocked_servers WHERE server_name = ?1;",
+  "describe": {
+    "columns": [
+      {
+        "name": "server_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e39f0499ed692bbf94a4593d54a8932615cd25b12a007971b8ba743fa97af1a3"
+}
