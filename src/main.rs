@@ -62,6 +62,11 @@ pub struct ServerPolicyEventContent {
     pub recommendation: String,
 }
 
+// Empty content to indicate no policy
+#[derive(Debug, Clone, Serialize, Deserialize, EventContent)]
+#[ruma_event(type = "m.policy.rule.server", kind = State, state_key_type = String)]
+pub struct NoPolicyEventContent {}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -289,11 +294,9 @@ async fn main() {
                                         .unwrap(),
                                     )
                                     .unwrap();
-                                let unban_event = ServerPolicyEventContent {
-                                    entity: dest.to_string(),
-                                    reason: "Server is no longer behind Cloudflare".to_string(),
-                                    recommendation: "m.allow".to_string(),
-                                };
+                                // Replace the event with just {} to indicate no policy
+                                let unban_event = NoPolicyEventContent {};
+                    
                                 room.send_state_event_for_key(dest, unban_event)
                                     .await
                                     .unwrap();
